@@ -2,11 +2,16 @@
 routers/applications.py
 Feature 4: Human-Reviewed Auto Apply (autofill)
 Feature 8: Application Tracker Dashboard
-GET    /api/applications
-POST   /api/applications
-PATCH  /api/applications/{id}
-DELETE /api/applications/{id}
-POST   /api/applications/autofill
+
+GET    /api/applications           — list all tracked applications
+POST   /api/applications/autofill  — AI pre-fill (registered FIRST to avoid path conflict)
+POST   /api/applications           — add a new application
+PATCH  /api/applications/{id}      — update status/notes
+DELETE /api/applications/{id}      — remove application
+
+IMPORTANT: /autofill must be registered before /{app_id} routes.
+FastAPI matches routes top-to-bottom, so 'autofill' would be caught
+by /{app_id} if ordered incorrectly.
 """
 
 import uuid
@@ -21,6 +26,22 @@ VALID_STATUSES = {"saved", "applied", "screening", "interview", "offer", "reject
 
 # In-memory store — replace with PostgreSQL for production
 _store: dict[str, dict] = {}
+
+
+@router.post("/autofill", response_model=AutofillResponse)
+async def autofill_application(body: AutofillRequest):
+    """
+    Pre-fill application fields for user review.
+    User MUST review and submit manually — we never auto-submit.
+    Registered first to prevent 'autofill' being caught by /{app_id}.
+    """
+    try:
+        result = await ai_service.autofill_application(
+            body.resume_text, body.job_description, body.job_title, body.company_name
+        )
+        return AutofillResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/", response_model=list[Application])
@@ -78,18 +99,3 @@ def delete_application(app_id: str):
         raise HTTPException(status_code=404, detail="Application not found.")
     del _store[app_id]
     return {"deleted": True}
-
-
-@router.post("/autofill", response_model=AutofillResponse)
-async def autofill_application(body: AutofillRequest):
-    """
-    Pre-fill application fields for user review.
-    User MUST review and submit manually — we never auto-submit.
-    """
-    try:
-        result = await ai_service.autofill_application(
-            body.resume_text, body.job_description, body.job_title, body.company_name
-        )
-        return AutofillResponse(**result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
