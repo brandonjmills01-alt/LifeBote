@@ -16,16 +16,35 @@ router = APIRouter()
 
 @router.post("/search", response_model=JobSearchResponse)
 async def search_jobs(body: JobSearchRequest):
+    # Prefer the structured profile when present: it gives the user the best
+    # default query even if they didn't type a job title.
+    query = body.job_title or ""
+    if not query and body.resume_profile and body.resume_profile.job_titles:
+        query = body.resume_profile.job_titles[0]
+    if not query:
+        query = "professional"
+
+    # Use profile locations as a default when the user didn't specify one
+    location = body.location
+    if not location and body.resume_profile and body.resume_profile.locations:
+        first = body.resume_profile.locations[0]
+        if first.lower() != "remote":
+            location = first
+
     raw_jobs = await job_service.search_jobs(
-        query=body.job_title or "professional",
-        location=body.location,
+        query=query,
+        location=location,
         work_mode=body.work_mode,
     )
     if not raw_jobs:
         return JobSearchResponse(jobs=[], total=0)
 
+    # Build the text used for AI scoring. Profile-only callers (Auto Apply)
+    # still get rich matching because the profile is rendered as text.
+    scoring_text = body.resume_text or _profile_to_scoring_text(body.resume_profile)
+
     # Score all jobs + check for fakes — both run in parallel
-    score_tasks    = [ai_service.score_job_match(body.resume_text, str(j)) for j in raw_jobs]
+    score_tasks    = [ai_service.score_job_match(scoring_text, str(j)) for j in raw_jobs]
     fake_tasks     = [
         ai_service.check_fake_job(
             j.get("job_title",""), j.get("employer_name",""),
@@ -53,6 +72,18 @@ async def search_jobs(body: JobSearchRequest):
 
     listings.sort(key=lambda j: j.match_score, reverse=True)
     return JobSearchResponse(jobs=listings, total=len(listings))
+
+
+def _profile_to_scoring_text(profile) -> str:
+    """Flatten a ResumeProfile into the kind of free-form text the scorer expects."""
+    if not profile:
+        return ""
+    bits = []
+    if profile.job_titles: bits.append(", ".join(profile.job_titles))
+    bits.append(f"{profile.experience_years} years experience · {profile.seniority} level")
+    if profile.skills:     bits.append("Skills: " + ", ".join(profile.skills))
+    if profile.industries: bits.append("Industries: " + ", ".join(profile.industries))
+    return "\n".join(bits)
 
 
 @router.post("/check-fake", response_model=FakeJobCheckResponse)

@@ -34,14 +34,51 @@ async def autofill_application(body: AutofillRequest):
     Pre-fill application fields for user review.
     User MUST review and submit manually — we never auto-submit.
     Registered first to prevent 'autofill' being caught by /{app_id}.
+
+    Accepts either:
+      - resume_text (legacy path used by the Auto Apply tab)
+      - resume_profile (T3 path: structured profile from /resume/analyze)
     """
+    # Build resume_text from a structured profile when only the profile is given.
+    # The AI / fallback both consume plain text; this keeps the contract simple.
+    resume_text = body.resume_text or _profile_to_text(body.resume_profile)
+    if not resume_text or not resume_text.strip():
+        raise HTTPException(status_code=400, detail="Provide either resume_text or resume_profile.")
+
     try:
         result = await ai_service.autofill_application(
-            body.resume_text, body.job_description, body.job_title, body.company_name
+            resume_text, body.job_description, body.job_title, body.company_name
         )
         return AutofillResponse(**result)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not pre-fill the application. Please try again.")
+
+
+def _profile_to_text(profile) -> str:
+    """Render a ResumeProfile into a plain-text resume the AI / fallback can consume."""
+    if not profile:
+        return ""
+    parts = []
+    if profile.job_titles:
+        parts.append("TARGET ROLES")
+        parts.append(", ".join(profile.job_titles))
+        parts.append("")
+    parts.append(f"EXPERIENCE: {profile.experience_years} years · {profile.seniority.title()} level")
+    if profile.skills:
+        parts.append("")
+        parts.append("SKILLS")
+        parts.append(", ".join(profile.skills))
+    if profile.industries:
+        parts.append("")
+        parts.append("INDUSTRIES")
+        parts.append(", ".join(profile.industries))
+    if profile.locations:
+        parts.append("")
+        parts.append("LOCATIONS")
+        parts.append(", ".join(profile.locations))
+    return "\n".join(parts)
 
 
 @router.get("/", response_model=list[Application])

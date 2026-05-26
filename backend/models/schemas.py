@@ -37,16 +37,56 @@ class ResumeTailorResponse(BaseModel):
     resume_versions:  dict[str, str]   # e.g. {"technical": "...", "executive": "..."}
 
 
+# ── T2: Resume Upload / Export ────────────────────────────────────────────────
+
+class ResumeUploadResponse(BaseModel):
+    filename:   str
+    size_bytes: int
+    format:     Literal["pdf", "docx"]
+    text:       str
+    pages:      Optional[int] = None
+
+
+class ResumeExportRequest(BaseModel):
+    resume_text:       str
+    full_name:         Optional[str] = None
+    contact_email:     Optional[str] = None
+    contact_phone:     Optional[str] = None
+    contact_linkedin:  Optional[str] = None
+
+
+# ── T3: Structured Profile (drives Auto Apply auto-matching) ─────────────────
+
+SeniorityLevel = Literal["entry", "junior", "mid", "senior", "lead", "principal", "executive"]
+
+
+class ResumeProfile(BaseModel):
+    skills:           list[str] = []
+    experience_years: int       = Field(default=0, ge=0, le=60)
+    job_titles:       list[str] = []
+    seniority:        SeniorityLevel = "mid"
+    industries:       list[str] = []
+    locations:        list[str] = []
+
+
+class ResumeAnalyzeRequest(BaseModel):
+    resume_text: str
+
+
 # ── Feature 2: Job Matching ───────────────────────────────────────────────────
 
 class JobSearchRequest(BaseModel):
-    resume_text:  str
-    job_title:    Optional[str] = None
-    location:     Optional[str] = None
-    work_mode:    Literal["remote", "hybrid", "onsite", "any"] = "any"
-    salary_min:   Optional[int] = None
-    salary_max:   Optional[int] = None
-    industries:   list[str]     = []
+    # resume_text remains required for backward compatibility with the existing
+    # Job Search tab. The Auto Apply tab also sends a richer resume_profile when
+    # available so the backend can build a stronger query.
+    resume_text:    str
+    job_title:      Optional[str] = None
+    location:       Optional[str] = None
+    work_mode:      Literal["remote", "hybrid", "onsite", "any"] = "any"
+    salary_min:     Optional[int] = None
+    salary_max:     Optional[int] = None
+    industries:     list[str]     = []
+    resume_profile: Optional[ResumeProfile] = None
 
 
 class JobListing(BaseModel):
@@ -74,10 +114,15 @@ class JobSearchResponse(BaseModel):
 # ── Feature 4: Human-Reviewed Auto Apply ──────────────────────────────────────
 
 class AutofillRequest(BaseModel):
-    resume_text:     str
+    # Either resume_text OR resume_profile may be provided.
+    # resume_text is the historical path; resume_profile is the new T3 path
+    # used by the redesigned Auto Apply flow.
+    resume_text:     Optional[str] = None
+    resume_profile:  Optional[ResumeProfile] = None
     job_description: str
     job_title:       str
     company_name:    str
+    job_id:          Optional[str] = None   # opaque identifier carried back to the client
 
 
 class AutofillResponse(BaseModel):

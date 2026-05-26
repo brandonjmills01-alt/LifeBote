@@ -106,6 +106,163 @@ async def score_job_match(resume_text: str, job_description: str) -> dict:
     }
 
 
+# ── T3 (Auto Apply Redesign): Resume Profile Extraction ──────────────────────
+
+ANALYZE_SYSTEM = """
+Extract a structured profile from a resume. Be conservative — never invent.
+Choose seniority from: entry, junior, mid, senior, lead, principal, executive.
+Return ONLY valid JSON:
+{
+  "skills":           ["Python", "AWS"],
+  "experience_years": 7,
+  "job_titles":       ["Software Engineer", "Backend Engineer"],
+  "seniority":        "senior",
+  "industries":       ["Technology", "Finance"],
+  "locations":        ["San Francisco, CA", "Remote"]
+}
+"""
+
+# Rule-based fallback: keep additions cheap and predictable.
+_SENIORITY_KEYWORDS = [
+    ("executive", ["chief executive", "cto", "cfo", "ceo", "vp ", "vice president", "head of"]),
+    ("principal", ["principal "]),
+    ("lead",      ["lead ", " lead,", "engineering lead", "team lead", "tech lead"]),
+    ("senior",    ["senior ", "sr. ", "sr ", "staff "]),
+    ("junior",    ["junior ", "jr. ", "jr ", "entry-level", "associate "]),
+    ("entry",     ["intern", "trainee", "graduate"]),
+]
+
+_TITLE_RE = re.compile(
+    r"\b(software engineer|backend engineer|frontend engineer|full[\s-]?stack engineer|"
+    r"data (?:scientist|analyst|engineer)|machine learning engineer|product manager|"
+    r"project manager|program manager|designer|ux designer|ui designer|"
+    r"marketing manager|sales (?:manager|representative)|recruiter|"
+    r"financial analyst|accountant|consultant|attorney|teacher|nurse|"
+    r"devops engineer|site reliability engineer|qa engineer|security engineer|"
+    r"architect|developer|engineer|analyst|manager|director)\b",
+    re.IGNORECASE,
+)
+
+_LOCATION_RE = re.compile(
+    r"\b([A-Z][a-zA-Z\.]+(?:\s+[A-Z][a-zA-Z\.]+){0,2}),\s*([A-Z]{2})\b"
+)
+
+_INDUSTRY_HINTS = {
+    "Technology":     ["python", "java", "aws", "docker", "kubernetes", "react", "saas", "software", "engineer"],
+    "Healthcare":     ["nurse", "patient", "clinic", "hospital", "medical", "pharma"],
+    "Finance":        ["finance", "investment", "trading", "accounting", "cpa", "audit"],
+    "Education":      ["teacher", "professor", "curriculum", "school", "university", "edtech"],
+    "Marketing":      ["marketing", "seo", "campaign", "brand", "content", "social media"],
+    "Legal":          ["attorney", "paralegal", "litigation", "compliance", "law firm"],
+    "Construction":   ["construction", "civil engineer", "structural", "hvac"],
+    "Retail":         ["retail", "merchandise", "store manager", "e-commerce", "shopify"],
+    "Non-Profit":     ["non-profit", "nonprofit", "grant", "foundation", "ngo"],
+    "Media":          ["video", "editor", "journalism", "newsroom", "broadcast"],
+    "Aerospace":      ["aerospace", "satellite", "defense", "uav"],
+    "Energy":         ["solar", "petroleum", "renewable", "battery"],
+    "Human Resources":["talent acquisition", "people operations", "recruiting", "hrbp"],
+    "Consulting":     ["consultant", "advisory"],
+}
+
+
+_ACRONYM_SKILLS = {"aws", "gcp", "sql", "ci/cd", "qa", "ml", "ai", "api", "css", "html", "ios"}
+_SPECIAL_SKILL_CASE = {
+    "javascript": "JavaScript",
+    "typescript": "TypeScript",
+    "nodejs":     "Node.js",
+    "node":       "Node.js",
+    "c++":        "C++",
+    "fastapi":    "FastAPI",
+    "postgresql": "PostgreSQL",
+    "mongodb":    "MongoDB",
+    "powerbi":    "Power BI",
+    "power bi":   "Power BI",
+}
+
+
+def _normalize_skill(s: str) -> str:
+    low = s.lower()
+    if low in _SPECIAL_SKILL_CASE: return _SPECIAL_SKILL_CASE[low]
+    if low in _ACRONYM_SKILLS:     return low.upper()
+    return s.title() if s.islower() else s
+
+
+def _rule_based_analyze(resume_text: str) -> dict:
+    text = resume_text or ""
+    lower = text.lower()
+
+    # Skills via the existing SKILL_RE, normalized so known acronyms stay uppercase.
+    from services.resume_scorer import extract_keywords
+    skills = sorted({_normalize_skill(s) for s in extract_keywords(text)}, key=str.lower)
+
+    # Years of experience: take the largest "X years" mention, then sanity-clamp
+    yrs = [int(m.group(1)) for m in re.finditer(r"(\d{1,2})\+?\s+years?", lower)]
+    experience_years = min(max(yrs) if yrs else 0, 50)
+
+    # Job titles — dedupe while preserving order
+    seen: set[str] = set()
+    job_titles: list[str] = []
+    for m in _TITLE_RE.finditer(text):
+        t = " ".join(w.capitalize() for w in m.group(0).split())
+        if t.lower() not in seen:
+            seen.add(t.lower())
+            job_titles.append(t)
+    job_titles = job_titles[:8]
+
+    # Seniority: highest match wins
+    seniority = "mid"
+    for label, hints in _SENIORITY_KEYWORDS:
+        if any(h in lower for h in hints):
+            seniority = label
+            break
+    if seniority == "mid" and experience_years >= 8:
+        seniority = "senior"
+    elif seniority == "mid" and experience_years <= 2 and experience_years > 0:
+        seniority = "junior"
+
+    # Industries: any hint match counts
+    industries = [ind for ind, hints in _INDUSTRY_HINTS.items() if any(h in lower for h in hints)]
+
+    # Locations — common "City, ST" pattern. Always include "Remote" if mentioned.
+    locations: list[str] = []
+    seen_locs: set[str] = set()
+    for m in _LOCATION_RE.finditer(text):
+        loc = f"{m.group(1)}, {m.group(2)}"
+        if loc.lower() not in seen_locs:
+            seen_locs.add(loc.lower())
+            locations.append(loc)
+    if "remote" in lower and "Remote" not in locations:
+        locations.append("Remote")
+    locations = locations[:5]
+
+    return {
+        "skills":           skills[:20],
+        "experience_years": experience_years,
+        "job_titles":       job_titles,
+        "seniority":        seniority,
+        "industries":       industries[:5],
+        "locations":        locations,
+    }
+
+
+async def analyze_resume(resume_text: str) -> dict:
+    """Extract a structured profile. Falls back to rules when no AI key."""
+    if _has_key():
+        try:
+            result = await _chat_json(ANALYZE_SYSTEM, f"--- RESUME ---\n{resume_text}")
+            # Coerce shape so the response model accepts it
+            result.setdefault("skills", [])
+            result.setdefault("experience_years", 0)
+            result.setdefault("job_titles", [])
+            result.setdefault("seniority", "mid")
+            result.setdefault("industries", [])
+            result.setdefault("locations", [])
+            return result
+        except Exception:
+            pass  # Fall through to rule-based
+    return _rule_based_analyze(resume_text)
+
+
 # ── Feature 4: Auto-fill Application ──────────────────────────────────────────
 
 AUTOFILL_SYSTEM = """

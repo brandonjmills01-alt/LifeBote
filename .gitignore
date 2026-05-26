@@ -25,3 +25,6 @@ frontend/.env
 
 # Logs
 *.log
+
+# Local Claude / preview tooling (not project code)
+.claude/
